@@ -1,6 +1,6 @@
 /** @type {import('next').NextConfig} */
 const nextConfig = {
-  serverExternalPackages: ["fluent-ffmpeg", "@ffprobe-installer/ffprobe"],
+  serverExternalPackages: ["ffprobe-static"],
   images: {
     remotePatterns: [
       { protocol: "https", hostname: "**" }

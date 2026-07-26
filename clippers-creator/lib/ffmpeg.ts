@@ -1,10 +1,5 @@
-import ffmpeg from "fluent-ffmpeg";
-import ffprobeInstaller from "@ffprobe-installer/ffprobe";
-
-// Point fluent-ffmpeg at the prebuilt ffprobe binary that ships with the
-// @ffprobe-installer/ffprobe package. This means we don't need ffmpeg
-// installed on the Render host itself — it's bundled via npm.
-ffmpeg.setFfprobePath(ffprobeInstaller.path);
+import { spawn } from "child_process";
+import ffprobeStatic from "ffprobe-static";
 
 export interface VideoProbeResult {
   durationSec: number;
@@ -13,25 +8,57 @@ export interface VideoProbeResult {
 }
 
 /**
- * Reads basic metadata (duration, dimensions) from a video file on disk
- * using ffprobe. Throws if the file isn't a readable media file.
+ * Reads basic metadata (duration, dimensions) from a video file on disk by
+ * spawning the ffprobe binary (bundled by ffprobe-static) directly and
+ * parsing its JSON output. Throws if the file isn't a readable media file.
  */
 export function probeVideo(filePath: string): Promise<VideoProbeResult> {
   return new Promise((resolve, reject) => {
-    ffmpeg.ffprobe(filePath, (err, data) => {
-      if (err) {
-        reject(err);
+    const args = [
+      "-v",
+      "error",
+      "-print_format",
+      "json",
+      "-show_format",
+      "-show_streams",
+      filePath
+    ];
+
+    const proc = spawn(ffprobeStatic.path, args);
+
+    let stdout = "";
+    let stderr = "";
+
+    proc.stdout.on("data", (chunk) => {
+      stdout += chunk;
+    });
+    proc.stderr.on("data", (chunk) => {
+      stderr += chunk;
+    });
+
+    proc.on("error", reject);
+
+    proc.on("close", (code) => {
+      if (code !== 0) {
+        reject(new Error(stderr || `ffprobe exited with code ${code}`));
         return;
       }
 
-      const durationSec = data.format.duration ? Math.round(data.format.duration) : 0;
-      const videoStream = data.streams.find((s) => s.codec_type === "video");
+      try {
+        const data = JSON.parse(stdout);
+        const durationSec = data.format?.duration ? Math.round(parseFloat(data.format.duration)) : 0;
+        const videoStream = (data.streams ?? []).find(
+          (s: { codec_type?: string }) => s.codec_type === "video"
+        );
 
-      resolve({
-        durationSec,
-        width: videoStream?.width,
-        height: videoStream?.height
-      });
+        resolve({
+          durationSec,
+          width: videoStream?.width,
+          height: videoStream?.height
+        });
+      } catch (err) {
+        reject(err);
+      }
     });
   });
 }
