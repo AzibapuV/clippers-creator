@@ -1,47 +1,96 @@
 "use client";
 
-import { useState } from "react";
+import { useRef, useState } from "react";
 import { useRouter } from "next/navigation";
+import { motion } from "framer-motion";
 import { UploadCloud, Link as LinkIcon } from "lucide-react";
+import { useToast } from "@/components/ToastProvider";
 
 export default function AddVideoForm({ projectId }: { projectId: string }) {
   const router = useRouter();
+  const { showToast } = useToast();
   const [mode, setMode] = useState<"upload" | "url">("upload");
   const [url, setUrl] = useState("");
-  const [error, setError] = useState<string | null>(null);
+  const [dragActive, setDragActive] = useState(false);
+  const [progress, setProgress] = useState<number | null>(null);
   const [loading, setLoading] = useState(false);
+  const inputRef = useRef<HTMLInputElement>(null);
+
+  function getClientDuration(file: File): Promise<number | null> {
+    return new Promise((resolve) => {
+      const videoEl = document.createElement("video");
+      videoEl.preload = "metadata";
+      const objectUrl = URL.createObjectURL(file);
+
+      const cleanup = () => URL.revokeObjectURL(objectUrl);
+
+      videoEl.onloadedmetadata = () => {
+        cleanup();
+        resolve(Number.isFinite(videoEl.duration) ? Math.round(videoEl.duration) : null);
+      };
+      videoEl.onerror = () => {
+        cleanup();
+        resolve(null);
+      };
+      videoEl.src = objectUrl;
+    });
+  }
 
   async function submitFile(file: File) {
-    setError(null);
+    if (!file.type.startsWith("video/")) {
+      showToast("That file isn't a video", "error");
+      return;
+    }
+
     setLoading(true);
+    setProgress(0);
+
+    const durationSec = await getClientDuration(file);
 
     const form = new FormData();
     form.append("file", file);
+    if (durationSec) form.append("durationSec", String(durationSec));
 
-    try {
-      const res = await fetch(`/api/projects/${projectId}/videos`, {
-        method: "POST",
-        body: form
-      });
-      const data = await res.json();
+    const xhr = new XMLHttpRequest();
+    xhr.open("POST", `/api/projects/${projectId}/videos`);
 
-      if (!res.ok) {
-        setError(data.error ?? "Upload failed");
-        setLoading(false);
+    xhr.upload.onprogress = (e) => {
+      if (e.lengthComputable) {
+        setProgress(Math.round((e.loaded / e.total) * 100));
+      }
+    };
+
+    xhr.onload = () => {
+      setLoading(false);
+      setProgress(null);
+
+      let data: { error?: string } = {};
+      try {
+        data = JSON.parse(xhr.responseText);
+      } catch {
+        // ignore parse failure, handled by status check below
+      }
+
+      if (xhr.status < 200 || xhr.status >= 300) {
+        showToast(data.error ?? "Upload failed", "error");
         return;
       }
 
-      setLoading(false);
+      showToast("Video uploaded", "success");
       router.refresh();
-    } catch {
-      setError("Upload failed. Try again.");
+    };
+
+    xhr.onerror = () => {
       setLoading(false);
-    }
+      setProgress(null);
+      showToast("Upload failed. Check your connection and try again.", "error");
+    };
+
+    xhr.send(form);
   }
 
   async function submitUrl(e: React.FormEvent) {
     e.preventDefault();
-    setError(null);
     setLoading(true);
 
     try {
@@ -53,16 +102,17 @@ export default function AddVideoForm({ projectId }: { projectId: string }) {
       const data = await res.json();
 
       if (!res.ok) {
-        setError(data.error ?? "Import failed");
+        showToast(data.error ?? "Import failed", "error");
         setLoading(false);
         return;
       }
 
+      showToast("Video queued", "success");
       setUrl("");
       setLoading(false);
       router.refresh();
     } catch {
-      setError("Import failed. Try again.");
+      showToast("Import failed. Try again.", "error");
       setLoading(false);
     }
   }
@@ -89,12 +139,49 @@ export default function AddVideoForm({ projectId }: { projectId: string }) {
       </div>
 
       {mode === "upload" ? (
-        <label className="flex flex-col items-center justify-center gap-2 border border-dashed border-ink-line rounded-lg py-10 cursor-pointer hover:border-wave/50 transition-colors">
-          <UploadCloud className="h-6 w-6 text-muted" />
-          <span className="text-sm text-muted">
-            {loading ? "Uploading…" : "Tap to choose a video file"}
-          </span>
+        <div
+          onClick={() => !loading && inputRef.current?.click()}
+          onDragOver={(e) => {
+            e.preventDefault();
+            if (!loading) setDragActive(true);
+          }}
+          onDragLeave={() => setDragActive(false)}
+          onDrop={(e) => {
+            e.preventDefault();
+            setDragActive(false);
+            const file = e.dataTransfer.files?.[0];
+            if (file && !loading) submitFile(file);
+          }}
+          className={`flex flex-col items-center justify-center gap-2 border rounded-lg py-10 cursor-pointer transition-colors ${
+            dragActive
+              ? "border-wave bg-wave/5"
+              : "border-dashed border-ink-line hover:border-wave/50"
+          }`}
+        >
+          <motion.div animate={dragActive ? { y: -4 } : { y: 0 }}>
+            <UploadCloud className={`h-6 w-6 ${dragActive ? "text-wave" : "text-muted"}`} />
+          </motion.div>
+
+          {loading && progress !== null ? (
+            <div className="w-full max-w-[200px] flex flex-col items-center gap-2">
+              <div className="w-full h-1.5 bg-ink-line rounded-full overflow-hidden">
+                <motion.div
+                  className="h-full bg-signal"
+                  initial={{ width: 0 }}
+                  animate={{ width: `${progress}%` }}
+                  transition={{ ease: "easeOut" }}
+                />
+              </div>
+              <span className="text-xs font-mono text-muted">{progress}%</span>
+            </div>
+          ) : (
+            <span className="text-sm text-muted">
+              {dragActive ? "Drop it" : "Tap or drag a video file here"}
+            </span>
+          )}
+
           <input
+            ref={inputRef}
             type="file"
             accept="video/*"
             className="hidden"
@@ -104,7 +191,7 @@ export default function AddVideoForm({ projectId }: { projectId: string }) {
               if (file) submitFile(file);
             }}
           />
-        </label>
+        </div>
       ) : (
         <form onSubmit={submitUrl} className="flex flex-col gap-3">
           <div className="flex items-center gap-2 bg-ink border border-ink-line rounded-md px-3 py-2.5">
@@ -127,8 +214,6 @@ export default function AddVideoForm({ projectId }: { projectId: string }) {
           </button>
         </form>
       )}
-
-      {error && <p className="text-signal text-sm mt-3">{error}</p>}
     </div>
   );
 }

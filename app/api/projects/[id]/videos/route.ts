@@ -4,10 +4,9 @@ import { z } from "zod";
 import { authOptions } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
 import { saveUploadedVideo } from "@/lib/storage";
-import { probeVideo } from "@/lib/ffmpeg";
 import type { SourceType } from "@prisma/client";
 
-// Uses the Node runtime (not Edge) since we need fs + ffprobe.
+// Uses the Node runtime (not Edge) since we need fs for saving the upload.
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
@@ -33,6 +32,30 @@ async function getOwnedProject(projectId: string, userId: string) {
   return prisma.project.findFirst({ where: { id: projectId, userId } });
 }
 
+export async function GET(
+  req: Request,
+  { params }: { params: Promise<{ id: string }> }
+) {
+  const session = await getServerSession(authOptions);
+  if (!session?.user) {
+    return NextResponse.json({ error: "Not authenticated" }, { status: 401 });
+  }
+
+  const { id } = await params;
+  const userId = (session.user as { id: string }).id;
+  const project = await getOwnedProject(id, userId);
+  if (!project) {
+    return NextResponse.json({ error: "Project not found" }, { status: 404 });
+  }
+
+  const videos = await prisma.video.findMany({
+    where: { projectId: project.id },
+    orderBy: { createdAt: "desc" }
+  });
+
+  return NextResponse.json(videos);
+}
+
 export async function POST(
   req: Request,
   { params }: { params: Promise<{ id: string }> }
@@ -55,6 +78,8 @@ export async function POST(
   if (contentType.includes("multipart/form-data")) {
     const form = await req.formData();
     const file = form.get("file");
+    const durationField = form.get("durationSec");
+    const durationSec = typeof durationField === "string" ? Math.round(parseFloat(durationField)) : null;
 
     if (!(file instanceof File)) {
       return NextResponse.json({ error: "No file provided" }, { status: 400 });
@@ -75,21 +100,24 @@ export async function POST(
     });
 
     try {
-      const { storageKey, absolutePath } = await saveUploadedVideo(file);
-      const { durationSec } = await probeVideo(absolutePath);
+      const { storageKey } = await saveUploadedVideo(file);
 
       const updated = await prisma.video.update({
         where: { id: video.id },
-        data: { storageKey, durationSec, status: "READY" }
+        data: {
+          storageKey,
+          durationSec: durationSec && durationSec > 0 ? durationSec : null,
+          status: "READY"
+        }
       });
 
       return NextResponse.json(updated, { status: 201 });
     } catch (err) {
       await prisma.video.update({
         where: { id: video.id },
-        data: { status: "FAILED", statusDetail: "Could not read the uploaded file" }
+        data: { status: "FAILED", statusDetail: "Could not save the uploaded file" }
       });
-      return NextResponse.json({ error: "Could not process the uploaded file" }, { status: 500 });
+      return NextResponse.json({ error: "Could not save the uploaded file" }, { status: 500 });
     }
   }
 
